@@ -1,0 +1,8 @@
+models/action_models
+models/discard_models
+models/full_discard_models
+models/simple_action_models
+models/simple_discard_models
+useless
+results/game_results
+results/tests

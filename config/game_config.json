@@ -1,0 +1,7 @@
+{
+    "server_ip": "127.0.0.1",
+    "server_port": 5000,
+    "client_port": 5001,
+    "max_hand_size": 14,
+    "num_tile_types": 34
+  }
