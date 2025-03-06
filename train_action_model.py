@@ -19,25 +19,46 @@ from src.utils.train_utils import create_results_dir
 from src.utils.data_loader import MahjongActionDataset, split_dataset
 from src.utils.train_utils import setup_chinese_font
 
-def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
-    """
-    使用简化数据(只有手牌、rush牌和回合信息)训练基础动作模型
+def plot_training_history(history, results_dir):
+    """绘制训练历史图"""
+    # 确保matplotlib可以使用中文
+    setup_chinese_font()
     
-    参数:
-    num_epochs: 训练轮数
-    lr: 学习率
-    results_dir: 结果保存目录
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
     
-    返回:
-    model: 训练好的模型
-    results_dir: 结果保存目录
-    """
+    # 绘制损失曲线
+    ax1.plot(history['train_loss'], label='训练损失')
+    ax1.plot(history['val_loss'], label='验证损失')
+    ax1.set_xlabel('轮数')
+    ax1.set_ylabel('损失')
+    ax1.set_title('损失曲线')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # 绘制准确率曲线
+    ax2.plot(history['val_action_accuracy'], label='动作准确率')
+    if 'val_chi_accuracy' in history:
+        ax2.plot(history['val_chi_accuracy'], label='吃牌准确率')
+    elif 'val_top3_accuracy' in history:
+        ax2.plot(history['val_top3_accuracy'], label='Top-3准确率')
+    ax2.set_xlabel('轮数')
+    ax2.set_ylabel('准确率')
+    ax2.set_title('验证准确率')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, "training_history.png"))
+    plt.close()
+
+def setup_training_environment(model_type):
+    """设置训练环境和数据"""
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
     
     # 创建结果目录
-    results_dir = create_results_dir("simple_action_models")
+    results_dir = create_results_dir(f"{model_type}_action_models")
     print(f"训练结果将保存在: {results_dir}")
     
     # 创建数据集
@@ -51,6 +72,44 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False)
     
+    return device, results_dir, train_dataset, val_dataset, train_loader, val_loader, train_size, val_size
+
+def save_training_config(results_dir, config):
+    """保存训练配置"""
+    with open(os.path.join(results_dir, "training_config.json"), "w") as f:
+        json.dump(config, f, indent=4)
+
+def save_model(model, optimizer, epoch, accuracy, chi_accuracy, val_loss, filepath):
+    """保存模型"""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'action_accuracy': accuracy,
+        'loss': val_loss,
+    }
+    if chi_accuracy is not None:
+        checkpoint['chi_accuracy'] = chi_accuracy
+    
+    torch.save(checkpoint, filepath)
+    print(f"保存模型: {filepath}")
+
+def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
+    """
+    使用简化数据(只有手牌、rush牌和回合信息)训练基础动作模型
+    
+    参数:
+    num_epochs: 训练轮数
+    lr: 学习率
+    results_dir: 结果保存目录
+    
+    返回:
+    model: 训练好的模型
+    results_dir: 结果保存目录
+    """
+    # 设置训练环境
+    device, results_dir, train_dataset, val_dataset, train_loader, val_loader, train_size, val_size = setup_training_environment("simple")
+    
     # 保存训练配置
     config = {
         "batch_size": BATCH_SIZE,
@@ -61,8 +120,7 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
         "device": str(device),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-    with open(os.path.join(results_dir, "training_config.json"), "w") as f:
-        json.dump(config, f, indent=4)
+    save_training_config(results_dir, config)
     
     # 创建模型
     print("初始化吃碰杠胡决策模型...")
@@ -78,14 +136,10 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
     
     # 损失函数和优化器
     action_criterion = nn.CrossEntropyLoss()
-    chi_criterion = nn.CrossEntropyLoss(ignore_index=-1) 
+    chi_criterion = nn.CrossEntropyLoss(ignore_index=-1)  # 忽略非吃牌样本
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=2, 
-        verbose=True
+        optimizer, mode='min', factor=0.5, patience=2, verbose=True
     )
     
     # 训练记录
@@ -102,8 +156,9 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
     best_model_path = os.path.join(results_dir, "mahjong_action_best.pth")
     
     print(f"开始训练，共 {num_epochs} 个周期...")
-    # 在开始训练循环前添加
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # 启用同步CUDA操作，便于定位错误
+    # 启用同步CUDA操作，便于定位错误
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    
     try:
         for epoch in range(num_epochs):
             # 训练阶段
@@ -117,9 +172,7 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
                 turn = batch['turn'].to(device)
                 action_targets = batch['action'].to(device)
                 action_masks = batch['action_mask'].to(device)
-                
-                # 创建吃牌目标
-                chi_targets = batch['chi_indices'].to(device)  # [batch_size, 2]
+                chi_types = batch['chi_type'].to(device)  # 吃牌类型标签
                 
                 # 前向传播
                 action_logits, chi_logits = model(features, rush_tile, turn, action_masks)
@@ -134,18 +187,10 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
                 if chi_mask.sum() > 0:
                     # 从chi_logits中选择需要吃的样本
                     selected_chi_logits = chi_logits[chi_mask]
-                    selected_chi_targets = chi_targets[chi_mask]
+                    selected_chi_types = chi_types[chi_mask]
                     
-                    # 计算两张牌的损失（分别针对第一张和第二张牌的位置）
-                    chi_loss_1 = chi_criterion(
-                        selected_chi_logits[:, :14], 
-                        selected_chi_targets[:, 0]
-                    )
-                    chi_loss_2 = chi_criterion(
-                        selected_chi_logits[:, 14:], 
-                        selected_chi_targets[:, 1]
-                    )
-                    chi_loss = chi_loss_1 + chi_loss_2
+                    # 计算吃牌方式的损失
+                    chi_loss = chi_criterion(selected_chi_logits, selected_chi_types)
                 
                 # 总损失
                 loss = action_loss + chi_loss
@@ -173,7 +218,7 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
                 model, val_loader, action_criterion, chi_criterion, device)
             
             # 更新学习率
-            scheduler.step(action_accuracy)
+            scheduler.step(val_loss)
             
             # 记录训练历史
             history['epoch'].append(epoch)
@@ -192,32 +237,17 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
             # 保存最佳模型 (基于动作准确率)
             if action_accuracy > best_accuracy:
                 best_accuracy = action_accuracy
-                checkpoint = {
-                    'epoch': epoch + 1,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'action_accuracy': action_accuracy,
-                    'chi_accuracy': chi_accuracy,
-                    'loss': val_loss,
-                }
-                torch.save(checkpoint, best_model_path)
+                save_model(model, optimizer, epoch + 1, action_accuracy, 
+                          chi_accuracy, val_loss, best_model_path)
                 print(f"保存新的最佳模型，准确率: {action_accuracy:.4f}")
         
         # 绘制训练历史图
-        setup_chinese_font()
         plot_training_history(history, results_dir)
         
         # 保存最终模型
         final_model_path = os.path.join(results_dir, "mahjong_action_final.pth")
-        torch.save({
-            'epoch': num_epochs,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'action_accuracy': action_accuracy,
-            'chi_accuracy': chi_accuracy,
-            'loss': val_loss,
-        }, final_model_path)
-        print(f"保存最终模型")
+        save_model(model, optimizer, num_epochs, action_accuracy, 
+                  chi_accuracy, val_loss, final_model_path)
         
         print(f"\n训练完成! 最佳验证动作准确率: {best_accuracy:.4f}")
         print(f"结果保存在: {results_dir}")
@@ -229,15 +259,181 @@ def train_simple_action_model(num_epochs=30, lr=1e-4, results_dir=None):
         
         # 保存当前模型
         interrupted_model_path = os.path.join(results_dir, "mahjong_action_interrupted.pth")
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }, interrupted_model_path)
-        print(f"已保存中断时的模型: {interrupted_model_path}")
+        save_model(model, optimizer, epoch + 1, None, None, None, interrupted_model_path)
         
         # 绘制训练历史图
-        setup_chinese_font()
+        plot_training_history(history, results_dir)
+        
+        return model, history, results_dir
+
+def train_full_action_model(num_epochs=20, lr=1e-4, results_dir=None):
+    """
+    训练吃碰杠胡请求模型
+    
+    参数:
+    num_epochs: 训练轮数
+    lr: 学习率
+    results_dir: 结果保存目录
+    
+    返回:
+    model: 训练好的模型
+    history: 训练历史记录
+    results_dir: 结果保存目录
+    """
+    # 设置训练环境
+    device, results_dir, train_dataset, val_dataset, train_loader, val_loader, train_size, val_size = setup_training_environment("full")
+    
+    # 保存训练配置
+    config = {
+        "batch_size": BATCH_SIZE,
+        "num_epochs": num_epochs,
+        "learning_rate": lr,
+        "train_samples": train_size,
+        "val_samples": val_size,
+        "device": str(device),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    save_training_config(results_dir, config)
+    
+    # 创建模型
+    print("初始化吃碰杠胡决策模型...")
+    model = MahjongActionModel(
+        dropout_rate=0.1,
+        input_size=198,  # 新的输入尺寸: 14*4 + 16*3 + 30*3 = 198
+    ).to(device)
+    
+    # 计算参数数量
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"模型参数: 总数 {total_params/1e6:.2f}M, 可训练 {trainable_params/1e6:.2f}M")
+    
+    # 损失函数和优化器
+    action_criterion = nn.CrossEntropyLoss()
+    chi_criterion = nn.CrossEntropyLoss(ignore_index=-1)  # 忽略非吃牌样本
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2, verbose=True
+    )
+    
+    # 训练记录
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'val_loss': [],
+        'val_action_accuracy': [],
+        'val_chi_accuracy': []
+    }
+    
+    # 最佳模型跟踪
+    best_accuracy = 0.0
+    best_model_path = os.path.join(results_dir, "mahjong_action_best.pth")
+    
+    print(f"开始训练，共 {num_epochs} 个周期...")
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # 启用同步CUDA操作，便于定位错误
+    
+    try:
+        for epoch in range(num_epochs):
+            # 训练阶段
+            model.train()
+            train_loss = 0.0
+            
+            for i, batch in enumerate(train_loader):
+                # 获取输入和目标
+                features = batch['features'].to(device)
+                rush_tile = batch['rush_tile'].to(device)
+                turn = batch['turn'].to(device)
+                action_targets = batch['action'].to(device)
+                action_masks = batch['action_mask'].to(device)
+                chi_types = batch['chi_type'].to(device)  # 吃牌类型标签
+                
+                # 前向传播
+                action_logits, chi_logits = model(features, rush_tile, turn, action_masks)
+                
+                # 计算动作损失
+                action_loss = action_criterion(action_logits, action_targets)
+                
+                # 仅对需要吃牌的样本计算吃牌损失
+                chi_mask = (action_targets == ACTION_CHI)
+                chi_loss = 0.0
+                
+                if chi_mask.sum() > 0:
+                    # 从chi_logits中选择需要吃的样本
+                    selected_chi_logits = chi_logits[chi_mask]
+                    selected_chi_types = chi_types[chi_mask]
+                    
+                    # 计算吃牌方式的损失
+                    chi_loss = chi_criterion(selected_chi_logits, selected_chi_types)
+                
+                # 总损失
+                loss = action_loss + chi_loss
+                
+                # 反向传播和优化
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+                
+                # 打印进度
+                if (i + 1) % 50 == 0:
+                    print(f"Epoch [{epoch+1}/{num_epochs}], "
+                          f"Step [{i+1}/{len(train_loader)}], "
+                          f"Loss: {loss.item():.4f}, "
+                          f"Action Loss: {action_loss.item():.4f}, "
+                          f"Chi Loss: {chi_loss:.4f}")
+            
+            # 计算平均训练损失
+            train_loss = train_loss / len(train_loader)
+            
+            # 验证阶段
+            val_loss, action_accuracy, chi_accuracy = evaluate_action_model(
+                model, val_loader, action_criterion, chi_criterion, device)
+            
+            # 更新学习率
+            scheduler.step(val_loss)
+            
+            # 记录训练历史
+            history['epoch'].append(epoch)
+            history['train_loss'].append(train_loss)
+            history['val_loss'].append(val_loss)
+            history['val_action_accuracy'].append(action_accuracy)
+            history['val_chi_accuracy'].append(chi_accuracy)
+            
+            # 打印本轮结果
+            print(f"Epoch [{epoch+1}/{num_epochs}], "
+                  f"Train Loss: {train_loss:.4f}, "
+                  f"Val Loss: {val_loss:.4f}, "
+                  f"Action Accuracy: {action_accuracy:.4f}, "
+                  f"Chi Accuracy: {chi_accuracy:.4f}")
+            
+            # 保存最佳模型 (基于动作准确率)
+            if action_accuracy > best_accuracy:
+                best_accuracy = action_accuracy
+                save_model(model, optimizer, epoch + 1, action_accuracy, 
+                          chi_accuracy, val_loss, best_model_path)
+                print(f"保存新的最佳模型，准确率: {action_accuracy:.4f}")
+        
+        # 绘制训练历史图
+        plot_training_history(history, results_dir)
+        
+        # 保存最终模型
+        final_model_path = os.path.join(results_dir, "mahjong_action_final.pth")
+        save_model(model, optimizer, num_epochs, action_accuracy, 
+                  chi_accuracy, val_loss, final_model_path)
+        
+        print(f"\n训练完成! 最佳验证动作准确率: {best_accuracy:.4f}")
+        print(f"结果保存在: {results_dir}")
+        
+        return model, history, results_dir
+    
+    except KeyboardInterrupt:
+        print("\n训练被中断")
+        
+        # 保存当前模型
+        interrupted_model_path = os.path.join(results_dir, "mahjong_action_interrupted.pth")
+        save_model(model, optimizer, epoch + 1, None, None, None, interrupted_model_path)
+        
+        # 绘制训练历史图
         plot_training_history(history, results_dir)
         
         return model, history, results_dir
@@ -256,24 +452,8 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
     model: 微调后的模型
     results_dir: 结果保存目录
     """
-    # 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
-    
-    # 创建结果目录
-    results_dir = create_results_dir("finetuned_action_models")
-    print(f"训练结果将保存在: {results_dir}")
-    
-    # 加载数据集
-    full_dataset = MahjongActionDataset()
-    train_dataset, val_dataset = split_dataset(full_dataset, train_ratio=0.8)
-    train_size = len(train_dataset)
-    val_size = len(val_dataset)
-    print(f"划分数据集完成: 训练集 {train_size} 样本, 验证集 {val_size} 样本")
-    
-    # 创建数据加载器
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE*2, shuffle=False)
+    # 设置训练环境
+    device, results_dir, train_dataset, val_dataset, train_loader, val_loader, train_size, val_size = setup_training_environment("finetuned")
     
     # 加载预训练的简化模型
     print(f"加载预训练模型: {base_model_path}")
@@ -298,9 +478,7 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
         "device": str(device),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-    
-    with open(os.path.join(results_dir, "training_config.json"), "w") as f:
-        json.dump(config, f, indent=4)
+    save_training_config(results_dir, config)
     
     # 从简化模型加载权重到完整模型
     print("将简化模型的权重转移到完整模型...")
@@ -377,6 +555,7 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
     # 创建优化器和损失函数
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
+    chi_criterion = nn.CrossEntropyLoss(ignore_index=-1)
     
     # 学习率调整器
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -385,11 +564,11 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
     
     # 训练记录
     history = {
+        'epoch': [],
         'train_loss': [],
-        'train_accuracy': [],
         'val_loss': [],
-        'val_accuracy': [],
-        'val_top3_accuracy': []
+        'val_action_accuracy': [],
+        'val_chi_accuracy': []
     }
     
     # 最佳模型跟踪
@@ -420,11 +599,28 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
                     action_mask = torch.ones(features.size(0), NUM_ACTIONS, dtype=torch.bool, device=device)
                 
                 # 前向传播
-                outputs = model(features, rush_tile, turn, action_mask)
-                loss = criterion(outputs, action)
+                action_logits, chi_logits = model(features, rush_tile, turn, action_mask)
+                
+                # 计算动作损失
+                action_loss = criterion(action_logits, action)
+                
+                # 仅对需要吃牌的样本计算吃牌损失
+                chi_mask = (action == ACTION_CHI)
+                chi_loss = 0.0
+                
+                if chi_mask.sum() > 0 and 'chi_type' in batch:
+                    # 从chi_logits中选择需要吃的样本
+                    selected_chi_logits = chi_logits[chi_mask]
+                    selected_chi_types = batch['chi_type'].to(device)[chi_mask]
+                    
+                    # 计算吃牌方式的损失
+                    chi_loss = chi_criterion(selected_chi_logits, selected_chi_types)
+                
+                # 总损失
+                loss = action_loss + chi_loss
                 
                 # 计算训练准确率
-                _, preds = torch.max(outputs, 1)
+                _, preds = torch.max(action_logits, 1)
                 train_correct += (preds == action).sum().item()
                 train_total += action.size(0)
                 
@@ -448,8 +644,11 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
             epoch_train_accuracy = train_correct / train_total if train_total > 0 else 0
             
             # 记录训练历史
+            history['epoch'].append(epoch)
             history['train_loss'].append(epoch_train_loss)
-            history['train_accuracy'].append(epoch_train_accuracy)
+            history['val_loss'].append(val_loss)
+            history['val_action_accuracy'].append(action_accuracy)
+            history['val_chi_accuracy'].append(chi_accuracy)
             
             # 验证阶段
             model.eval()
@@ -564,377 +763,6 @@ def fine_tune_action_model(base_model_path, num_epochs=10, lr=5e-5, results_dir=
         
         return model, results_dir
 
-# 训练吃碰杠胡模型
-def train_full_action_model(num_epochs=20, lr=1e-4, results_dir=None):
-    """
-    训练吃碰杠胡请求模型
-    
-    参数:
-    data_folder: 数据文件夹路径
-    batch_size: 批次大小
-    num_epochs: 训练轮数
-    lr: 学习率
-    results_dir: 结果保存目录，如果为None则自动创建
-    
-    返回:
-    model: 训练好的模型
-    history: 训练历史记录
-    results_dir: 结果保存目录
-    """
-    # 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
-    
-    # 创建结果目录
-    results_dir = create_results_dir("action_models")
-    print(f"训练结果将保存在: {results_dir}")
-    
-    # 创建数据集
-    full_dataset = MahjongActionDataset()
-    train_dataset, val_dataset = split_dataset(full_dataset, train_ratio=0.8)
-    train_size = len(train_dataset)
-    val_size = len(val_dataset)
-    print(f"划分数据集完成: 训练集 {train_size} 样本, 验证集 {val_size} 样本")
-    
-    # 创建数据加载器
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False)
-    
-    # 保存训练配置
-    config = {
-        "batch_size": BATCH_SIZE,
-        "num_epochs": num_epochs,
-        "learning_rate": lr,
-        "train_samples": train_size,
-        "val_samples": val_size,
-        "device": str(device),
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    with open(os.path.join(results_dir, "training_config.json"), "w") as f:
-        json.dump(config, f, indent=4)
-    
-    # 创建模型
-    print("初始化吃碰杠胡决策模型...")
-    model = MahjongActionModel(
-        dropout_rate=0.1,
-        input_size=198,  # 新的输入尺寸: 14*4 + 16*3 + 30*3 = 198
-    ).to(device)
-    
-    # 计算参数数量
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"模型参数: 总数 {total_params/1e6:.2f}M, 可训练 {trainable_params/1e6:.2f}M")
-    
-    # 损失函数和优化器
-    action_criterion = nn.CrossEntropyLoss()
-    chi_criterion = nn.CrossEntropyLoss(ignore_index=-1) 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=2, 
-        verbose=True
-    )
-    
-    # 训练记录
-    history = {
-        'epoch': [],
-        'train_loss': [],
-        'val_loss': [],
-        'val_action_accuracy': [],
-        'val_chi_accuracy': []
-    }
-    
-    # 最佳模型跟踪
-    best_accuracy = 0.0
-    best_model_path = os.path.join(results_dir, "mahjong_action_best.pth")
-    
-    print(f"开始训练，共 {num_epochs} 个周期...")
-    # 在开始训练循环前添加
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # 启用同步CUDA操作，便于定位错误
-    try:
-        for epoch in range(num_epochs):
-            # 训练阶段
-            model.train()
-            train_loss = 0.0
-            
-            for i, batch in enumerate(train_loader):
-                # 获取输入和目标
-                features = batch['features'].to(device)
-                rush_tile = batch['rush_tile'].to(device)
-                turn = batch['turn'].to(device)
-                action_targets = batch['action'].to(device)
-                action_masks = batch['action_mask'].to(device)
-                
-                # 创建吃牌目标
-                chi_targets = batch['chi_indices'].to(device)  # [batch_size, 2]
-                
-                # 前向传播
-                action_logits, chi_logits = model(features, rush_tile, turn, action_masks)
-                
-                # 计算动作损失
-                action_loss = action_criterion(action_logits, action_targets)
-                
-                # 仅对需要吃牌的样本计算吃牌损失
-                chi_mask = (action_targets == ACTION_CHI)
-                chi_loss = 0.0
-                
-                if chi_mask.sum() > 0:
-                    # 从chi_logits中选择需要吃的样本
-                    selected_chi_logits = chi_logits[chi_mask]
-                    selected_chi_targets = chi_targets[chi_mask]
-                    
-                    # 计算两张牌的损失（分别针对第一张和第二张牌的位置）
-                    chi_loss_1 = chi_criterion(
-                        selected_chi_logits[:, :14], 
-                        selected_chi_targets[:, 0]
-                    )
-                    chi_loss_2 = chi_criterion(
-                        selected_chi_logits[:, 14:], 
-                        selected_chi_targets[:, 1]
-                    )
-                    chi_loss = chi_loss_1 + chi_loss_2
-                
-                # 总损失
-                loss = action_loss + chi_loss
-                
-                # 反向传播和优化
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                
-                train_loss += loss.item()
-                
-                # 打印进度
-                if (i + 1) % 50 == 0:
-                    print(f"Epoch [{epoch+1}/{num_epochs}], "
-                          f"Step [{i+1}/{len(train_loader)}], "
-                          f"Loss: {loss.item():.4f}, "
-                          f"Action Loss: {action_loss.item():.4f}, "
-                          f"Chi Loss: {chi_loss:.4f}")
-            
-            # 计算平均训练损失
-            train_loss = train_loss / len(train_loader)
-            
-            # 验证阶段
-            val_loss, action_accuracy, chi_accuracy = evaluate_action_model(
-                model, val_loader, action_criterion, chi_criterion, device)
-            
-            # 更新学习率
-            scheduler.step(action_accuracy)
-            
-            # 记录训练历史
-            history['epoch'].append(epoch)
-            history['train_loss'].append(train_loss)
-            history['val_loss'].append(val_loss)
-            history['val_action_accuracy'].append(action_accuracy)
-            history['val_chi_accuracy'].append(chi_accuracy)
-            
-            # 打印本轮结果
-            print(f"Epoch [{epoch+1}/{num_epochs}], "
-                  f"Train Loss: {train_loss:.4f}, "
-                  f"Val Loss: {val_loss:.4f}, "
-                  f"Action Accuracy: {action_accuracy:.4f}, "
-                  f"Chi Accuracy: {chi_accuracy:.4f}")
-            
-            # 保存最佳模型 (基于动作准确率)
-            if action_accuracy > best_accuracy:
-                best_accuracy = action_accuracy
-                checkpoint = {
-                    'epoch': epoch + 1,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'action_accuracy': action_accuracy,
-                    'chi_accuracy': chi_accuracy,
-                    'loss': val_loss,
-                }
-                torch.save(checkpoint, best_model_path)
-                print(f"保存新的最佳模型，准确率: {action_accuracy:.4f}")
-        
-        # 绘制训练历史图
-        setup_chinese_font()
-        plot_training_history(history, results_dir)
-        
-        # 保存最终模型
-        final_model_path = os.path.join(results_dir, "mahjong_action_final.pth")
-        torch.save({
-            'epoch': num_epochs,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'action_accuracy': action_accuracy,
-            'chi_accuracy': chi_accuracy,
-            'loss': val_loss,
-        }, final_model_path)
-        print(f"保存最终模型")
-        
-        print(f"\n训练完成! 最佳验证动作准确率: {best_accuracy:.4f}")
-        print(f"结果保存在: {results_dir}")
-        
-        return model, history, results_dir
-    
-    except KeyboardInterrupt:
-        print("\n训练被中断")
-        
-        # 保存当前模型
-        interrupted_model_path = os.path.join(results_dir, "mahjong_action_interrupted.pth")
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }, interrupted_model_path)
-        print(f"已保存中断时的模型: {interrupted_model_path}")
-        
-        # 绘制训练历史图
-        setup_chinese_font()
-        plot_training_history(history, results_dir)
-        
-        return model, history, results_dir
-
-def plot_training_history(history, results_dir):
-    """绘制训练历史图"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-    
-    # 绘制损失曲线
-    ax1.plot(history['train_loss'], label='训练损失')
-    ax1.plot(history['val_loss'], label='验证损失')
-    ax1.set_xlabel('轮数')
-    ax1.set_ylabel('损失')
-    ax1.set_title('损失曲线')
-    ax1.legend()
-    ax1.grid(True)
-    
-    # 绘制准确率曲线
-    ax2.plot(history['val_action_accuracy'], label='动作准确率')
-    ax2.plot(history['val_chi_accuracy'], label='吃牌准确率')
-    ax2.set_xlabel('轮数')
-    ax2.set_ylabel('准确率')
-    ax2.set_title('验证准确率')
-    ax2.legend()
-    ax2.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(results_dir, "training_history.png"))
-    plt.close()
-
-# 绘制训练历史记录图表
-def plot_action_request_history(history, results_dir):
-    """绘制吃碰杠胡模型的训练历史图表"""
-    # 确保matplotlib可以使用中文
-    setup_chinese_font()
-    
-    # 1. 损失曲线
-    plt.figure(figsize=(12, 6))
-    plt.plot(history['epoch'], history['train_loss'], 'b-', label='训练损失')
-    plt.plot(history['epoch'], history['val_loss'], 'r-', label='验证损失')
-    plt.title('训练和验证损失')
-    plt.xlabel('Epoch')
-    plt.ylabel('损失')
-    plt.legend()
-    plt.grid(True)
-    loss_path = os.path.join(results_dir, 'loss_curve.png')
-    plt.savefig(loss_path, dpi=300)
-    plt.close()
-    
-    # 2. 动作准确率曲线
-    plt.figure(figsize=(12, 6))
-    plt.plot(history['epoch'], history['train_action_acc'], 'b-', label='训练动作准确率')
-    plt.plot(history['epoch'], history['val_action_acc'], 'r-', label='验证动作准确率')
-    plt.title('动作预测准确率')
-    plt.xlabel('Epoch')
-    plt.ylabel('准确率')
-    plt.ylim(0, 1)
-    plt.legend()
-    plt.grid(True)
-    action_acc_path = os.path.join(results_dir, 'action_accuracy.png')
-    plt.savefig(action_acc_path, dpi=300)
-    plt.close()
-    
-    # 3. 吃牌准确率曲线
-    plt.figure(figsize=(12, 6))
-    plt.plot(history['epoch'], history['train_chi_acc'], 'b-', label='训练吃牌准确率')
-    plt.plot(history['epoch'], history['val_chi_acc'], 'r-', label='验证吃牌准确率')
-    plt.title('吃牌索引预测准确率')
-    plt.xlabel('Epoch')
-    plt.ylabel('准确率')
-    plt.ylim(0, 1)
-    plt.legend()
-    plt.grid(True)
-    chi_acc_path = os.path.join(results_dir, 'chi_accuracy.png')
-    plt.savefig(chi_acc_path, dpi=300)
-    plt.close()
-    
-    # 4. 学习率曲线
-    plt.figure(figsize=(12, 6))
-    plt.plot(history['epoch'], history['learning_rates'], 'g-')
-    plt.title('学习率变化')
-    plt.xlabel('Epoch')
-    plt.ylabel('学习率')
-    plt.yscale('log')
-    plt.grid(True)
-    lr_path = os.path.join(results_dir, 'learning_rate.png')
-    plt.savefig(lr_path, dpi=300)
-    plt.close()
-    
-    # 5. 组合图表
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    # 5.1 损失
-    axes[0, 0].plot(history['epoch'], history['train_loss'], 'b-', label='训练损失')
-    axes[0, 0].plot(history['epoch'], history['val_loss'], 'r-', label='验证损失')
-    axes[0, 0].set_title('训练和验证损失')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('损失')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True)
-    
-    # 5.2 动作准确率
-    axes[0, 1].plot(history['epoch'], history['train_action_acc'], 'b-', label='训练动作准确率')
-    axes[0, 1].plot(history['epoch'], history['val_action_acc'], 'r-', label='验证动作准确率')
-    axes[0, 1].set_title('动作预测准确率')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('准确率')
-    axes[0, 1].set_ylim(0, 1)
-    axes[0, 1].legend()
-    axes[0, 1].grid(True)
-    
-    # 5.3 吃牌准确率
-    axes[1, 0].plot(history['epoch'], history['train_chi_acc'], 'b-', label='训练吃牌准确率')
-    axes[1, 0].plot(history['epoch'], history['val_chi_acc'], 'r-', label='验证吃牌准确率')
-    axes[1, 0].set_title('吃牌索引预测准确率')
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('准确率')
-    axes[1, 0].set_ylim(0, 1)
-    axes[1, 0].legend()
-    axes[1, 0].grid(True)
-    
-    # 5.4 学习率
-    axes[1, 1].plot(history['epoch'], history['learning_rates'], 'g-')
-    axes[1, 1].set_title('学习率变化')
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('学习率')
-    axes[1, 1].set_yscale('log')
-    axes[1, 1].grid(True)
-    
-    plt.tight_layout()
-    combined_path = os.path.join(results_dir, 'combined_metrics.png')
-    plt.savefig(combined_path, dpi=300)
-    plt.close()
-
-# if __name__ == "__main__":
-#     model, history, results_dir = train_action_request_model(num_epochs=20, lr=LEARNING_RATE)
-#     print(f"训练完成! 结果保存在: {results_dir}")
-#     plot_action_request_history(history, results_dir)
-'''
-# 训练简化模型
-python train_action_model.py --mode simple --epochs 30 --lr 1e-4
-
-# 微调模型
-python train_action_model.py --mode finetune --base_model path/to/model.pth --epochs 15 --lr 5e-5
-
-# 直接训练完整模型
-python train_action_model.py --mode full --epochs 50 --lr 1e-4
-'''
 if __name__ == "__main__":
     # 设置命令行参数
     parser = argparse.ArgumentParser(description='训练麻将吃碰杠胡决策模型')
@@ -944,7 +772,7 @@ if __name__ == "__main__":
                       help='用于微调的基础模型路径')
     parser.add_argument('--epochs', type=int, default=30,
                       help='训练轮数')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default = 1e-4,
                       help='学习率')
     parser.add_argument('--debug', action='store_true',
                       help='开启调试模式')

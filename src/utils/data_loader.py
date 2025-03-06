@@ -521,15 +521,45 @@ class MahjongActionDataset(BaseMahjongDataset):
         else:
             chi_tensor = torch.full((2,), -1, dtype=torch.long)  # 用-1填充，表示无效索引
         
+        # 吃牌类型 (0=前吃, 1=中吃, 2=后吃)
+        if sample['action'] == ACTION_CHI and sample['chi_tiles']:
+            # 获取rush牌和chi牌的序号
+            rush_num = self._get_tile_number(sample['rush_tile'])
+            chi_nums = [self._get_tile_number(t) for t in sample['chi_tiles']]
+            
+            # 根据序号关系确定吃牌类型
+            if all(n < rush_num for n in chi_nums):  # 所有吃牌序号都小于rush牌
+                chi_type = 0  # 前吃
+            elif all(n > rush_num for n in chi_nums):  # 所有吃牌序号都大于rush牌
+                chi_type = 2  # 后吃
+            else:  # rush牌在中间
+                chi_type = 1  # 中吃
+            
+            chi_tensor = torch.tensor(chi_type, dtype=torch.long)
+        else:
+            chi_tensor = torch.tensor(-1, dtype=torch.long)  # 用-1表示非吃牌样本
+        
         return {
             'features': features_tensor,
             'rush_tile': rush_tile,
             'turn': turn_tensor,
             'action_mask': action_mask,
             'action': action,
-            'chi_indices': chi_tensor,
+            'chi_type': chi_tensor,  # 新的吃牌类型标签
             'game_id': sample['game_id']
         }
+    
+    # 辅助函数 - 获取牌的序号
+    def _get_tile_number(self, tile_id):
+        """将牌ID转换为数字序号 (0-8表示万, 9-17表示条, 18-26表示筒)"""
+        if tile_id < 9:  # 万
+            return tile_id
+        elif tile_id < 18:  # 条
+            return tile_id - 9
+        elif tile_id < 27:  # 筒
+            return tile_id - 18
+        else:  # 字牌
+            return tile_id  # 字牌不适用于顺子，这里只是占位
     
 def split_dataset(dataset, train_ratio=0.8, val_ratio=0.2, seed=None):
     # 设置随机种子

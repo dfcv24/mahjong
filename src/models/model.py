@@ -442,12 +442,12 @@ class SimpleMahjongActionModel(nn.Module):
             nn.Linear(D_MODEL*2, output_size)  # 输出：不操作 + 吃 + 碰 + 明杠 + 胡
         )
         
-        # 用于吃牌决策的额外输出头
+        # 修改吃牌决策头 - 从预测位置改为预测吃牌方式
         self.chi_head = nn.Sequential(
             nn.Linear(D_MODEL, D_MODEL),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(D_MODEL, 2 * MAX_HAND_SIZE)  # 预测两张用于吃的牌的位置
+            nn.Linear(D_MODEL, 3)  # 输出3种吃牌方式: 前吃, 中吃, 后吃
         )
     
     def forward(self, features, rush_tile, turn, action_mask=None):
@@ -462,7 +462,7 @@ class SimpleMahjongActionModel(nn.Module):
         
         返回:
         logits: [batch_size, output_size] 各操作的概率对数
-        chi_logits: [batch_size, MAX_HAND_SIZE] 各手牌位置用于吃的概率对数
+        chi_logits: [batch_size, 3] 各吃牌方式的概率对数
         """
         batch_size = features.size(0)
         
@@ -535,7 +535,95 @@ class SimpleMahjongActionModel(nn.Module):
             action_logits = action_logits.clone()
             action_logits[~action_mask] = -1e9
         
-        # 输出吃牌组合概率
-        chi_logits = self.chi_head(decision_features)  # [batch, 28]
+        # 输出吃牌方式的概率
+        chi_logits = self.chi_head(decision_features)  # [batch, 3]
         
         return action_logits, chi_logits
+        sequence = torch.cat([combined, rush_full_embed, turn_full_embed], dim=1)  # [batch, input_size+1, d_model]
+        sequence = self.embed_dropout(sequence)
+        
+        # 生成注意力掩码，处理填充值(NUM_TILE_TYPES)
+        # 创建填充掩码，值为NUM_TILE_TYPES的位置为True
+        padding_mask = (features == NUM_TILE_TYPES)  # [batch, input_size-1]
+        
+        # 为rush牌和回合token添加掩码
+        rush_padding = (rush_tile == NUM_TILE_TYPES).unsqueeze(1)  # [batch, 1]
+        padding_mask = torch.cat([
+            padding_mask, 
+            rush_padding,
+            torch.zeros(batch_size, 1, dtype=torch.bool, device=features.device)  # 回合token不掩码
+        ], dim=1)  # [batch, input_size+1]
+        
+        # 通过Transformer编码器
+        encoded = self.encoder(sequence, src_key_padding_mask=padding_mask)  # [batch, input_size+1, d_model]
+        
+        # 使用rush_tile和回合位置的输出作为决策基础
+        # 这里使用了一个简单的平均池化来融合这两个token的信息
+        decision_features = (encoded[:, -2, :] + encoded[:, -1, :]) / 2  # [batch, d_model]
+        # 使用回合位置的输出作为主要决策特征
+        # decision_features = encoded[:, -1, :]  # [batch, d_model]
+        
+        # 输出动作概率
+        logits = self.action_head(decision_features)  # [batch, output_size]
+        
+        # 输出动作类型概率
+        action_logits = self.action_head(decision_features)  # [batch, 5]
+        
+        # 如果提供了动作掩码，应用掩码
+        if action_mask is not None:
+            # 确保动作掩码是布尔值
+            if action_mask.dtype != torch.bool:
+                action_mask = action_mask.bool()
+            
+            # 将不可执行动作的logits设为很小的值
+            action_logits = action_logits.clone()
+            action_logits[~action_mask] = -1e9
+        
+        # 输出吃牌组合概率
+        chi_raw_logits = self.chi_head(decision_features)  # [batch, 3]
+        
+        # 如果是训练阶段或不需要应用掩码，直接返回
+        if self.training or action_mask is None:
+            return action_logits, chi_raw_logits
+        
+        # 在推理阶段，计算每种吃牌方式的合法性掩码
+        batch_size = features.shape[0]
+        chi_mask = torch.zeros((batch_size, 3), dtype=torch.bool, device=features.device)
+        
+        for i in range(batch_size):
+            # 只有在可以吃的情况下才计算掩码
+            if action_mask[i, ACTION_CHI]:
+                r_tile = rush_tile[i].item()
+                if r_tile < NUM_TILE_TYPES:  # 确保是有效的牌
+                    r_num = r_tile % 9  # 牌的点数 (0-8)
+                    suit = r_tile // 9   # 牌的花色 (0=万, 1=条, 2=筒)
+                    
+                    # 检查手牌中是否有构成顺子所需的牌
+                    hand = features[i, :14]
+                    
+                    # 检查前吃 (r-2, r-1)
+                    if r_num >= 2:
+                        tile1 = suit * 9 + (r_num - 2)
+                        tile2 = suit * 9 + (r_num - 1)
+                        if ((hand == tile1).sum() > 0) and ((hand == tile2).sum() > 0):
+                            chi_mask[i, 0] = True
+                    
+                    # 检查中吃 (r-1, r+1)
+                    if r_num >= 1 and r_num <= 7:
+                        tile1 = suit * 9 + (r_num - 1)
+                        tile2 = suit * 9 + (r_num + 1)
+                        if ((hand == tile1).sum() > 0) and ((hand == tile2).sum() > 0):
+                            chi_mask[i, 1] = True
+                    
+                    # 检查后吃 (r+1, r+2)
+                    if r_num <= 6:
+                        tile1 = suit * 9 + (r_num + 1)
+                        tile2 = suit * 9 + (r_num + 2)
+                        if ((hand == tile1).sum() > 0) and ((hand == tile2).sum() > 0):
+                            chi_mask[i, 2] = True
+        
+        # 应用掩码
+        chi_masked_logits = chi_raw_logits.clone()
+        chi_masked_logits[~chi_mask] = -1e9
+        
+        return action_logits, chi_masked_logits

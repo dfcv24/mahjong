@@ -593,27 +593,12 @@ def evaluate_action_model(model, data_loader, action_criterion, chi_criterion, d
     return avg_loss, action_accuracy, chi_accuracy
 
 def evaluate_simple_action_model(model, data_loader, action_criterion, chi_criterion, device):
-    """
-    评估吃碰杠胡决策模型
-    
-    参数:
-    model: 模型
-    data_loader: 数据加载器
-    action_criterion: 动作损失函数
-    chi_criterion: 吃牌损失函数
-    device: 计算设备
-    
-    返回:
-    avg_loss: 平均损失
-    action_accuracy: 动作准确率
-    chi_accuracy: 吃牌准确率
-    """
     model.eval()
-    total_loss = 0.0
+    val_loss = 0.0
     action_correct = 0
+    action_total = 0
     chi_correct = 0
-    total_samples = 0
-    total_chi_samples = 0
+    chi_total = 0
     
     with torch.no_grad():
         for batch in data_loader:
@@ -643,83 +628,41 @@ def evaluate_simple_action_model(model, data_loader, action_criterion, chi_crite
                 # 前向传播
                 action_logits, chi_logits = model(features, rush_tile, turn, action_masks)
                 
-                # 计算动作损失
+                # 计算动作损失和准确率
                 action_loss = action_criterion(action_logits, action_targets)
+                _, action_preds = torch.max(action_logits, dim=1)
+                action_correct += (action_preds == action_targets).sum().item()
+                action_total += action_targets.size(0)
                 
-                # 仅对吃牌样本计算吃牌损失
+                # 计算吃牌损失和准确率
                 chi_mask = (action_targets == ACTION_CHI)
                 chi_loss = 0.0
                 
                 if chi_mask.sum() > 0:
                     selected_chi_logits = chi_logits[chi_mask]
-                    selected_chi_targets = chi_targets[chi_mask]
+                    selected_chi_types = batch['chi_type'][chi_mask].to(device)
                     
-                    # 检查是否有有效的吃牌目标
-                    valid_targets = (selected_chi_targets >= 0) & (selected_chi_targets < 14)
+                    chi_loss = chi_criterion(selected_chi_logits, selected_chi_types)
                     
-                    if valid_targets[:, 0].any() and valid_targets[:, 1].any():
-                        chi_loss_1 = chi_criterion(
-                            selected_chi_logits[:, :14], 
-                            selected_chi_targets[:, 0]
-                        )
-                        chi_loss_2 = chi_criterion(
-                            selected_chi_logits[:, 14:], 
-                            selected_chi_targets[:, 1]
-                        )
-                        chi_loss = chi_loss_1 + chi_loss_2
+                    # 计算吃牌准确率
+                    _, chi_preds = torch.max(selected_chi_logits, dim=1)
+                    chi_correct += (chi_preds == selected_chi_types).sum().item()
+                    chi_total += selected_chi_types.size(0)
                 
                 # 总损失
                 loss = action_loss + chi_loss
-                total_loss += loss.item()
-                
-                # 计算动作准确率
-                _, action_preds = torch.max(action_logits, 1)
-                action_correct += (action_preds == action_targets).sum().item()
-                
-                # 计算吃牌准确率
-                chi_correct_count = 0
-                chi_sample_count = chi_mask.sum().item()
-                
-                if chi_sample_count > 0:
-                    selected_chi_logits = chi_logits[chi_mask]
-                    selected_chi_targets = chi_targets[chi_mask]
-                    
-                    # 只评估有效目标
-                    valid_targets = (selected_chi_targets >= 0) & (selected_chi_targets < 14)
-                    valid_samples = valid_targets[:, 0] & valid_targets[:, 1]
-                    valid_count = valid_samples.sum().item()
-                    
-                    if valid_count > 0:
-                        # 只对有效样本进行评估
-                        valid_logits = selected_chi_logits[valid_samples]
-                        valid_targets = selected_chi_targets[valid_samples]
-                        
-                        # 预测第一张和第二张牌的位置
-                        _, card1_preds = torch.max(valid_logits[:, :14], 1)
-                        _, card2_preds = torch.max(valid_logits[:, 14:], 1)
-                        
-                        # 检查两张牌是否都预测正确
-                        card1_correct = (card1_preds == valid_targets[:, 0])
-                        card2_correct = (card2_preds == valid_targets[:, 1])
-                        both_correct = card1_correct & card2_correct
-                        
-                        chi_correct_count = both_correct.sum().item()
-                        chi_sample_count = valid_count  # 更新为有效样本数
-                
-                chi_correct += chi_correct_count
-                total_samples += action_targets.size(0)
-                total_chi_samples += chi_sample_count
+                val_loss += loss.item()
                 
             except Exception as e:
                 print(f"评估时出错: {e}")
                 continue
     
-    # 计算平均指标
-    avg_loss = total_loss / max(len(data_loader), 1)
-    action_accuracy = action_correct / max(total_samples, 1)
-    chi_accuracy = chi_correct / max(total_chi_samples, 1)  # 避免除以0
+    # 计算平均损失和准确率
+    avg_val_loss = val_loss / len(data_loader)
+    action_accuracy = action_correct / action_total if action_total > 0 else 0
+    chi_accuracy = chi_correct / chi_total if chi_total > 0 else 0
     
-    return avg_loss, action_accuracy, chi_accuracy
+    return avg_val_loss, action_accuracy, chi_accuracy
 # def evaluate_model(model, dataloader, device):
 #     """评估模型性能"""
 #     model.eval()
