@@ -5,6 +5,7 @@ models/full_discard_models
 models/simple_action_models
 models/simple_discard_models
 models/total_models
+models/total_single_models
 useless
 results/game_results
 results/tests

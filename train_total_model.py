@@ -9,10 +9,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.models.config import BATCH_SIZE
-from src.models.model import MahjongTotalModel
+from src.models.model import MahjongTotalModel, MahjongTotalSingleModel
 from src.utils.constants import *
 from src.utils.train_utils import create_results_dir
-from src.utils.data_loader import MahjongTotalDataset, split_dataset
+from src.utils.data_loader import MahjongTotalDataset, split_dataset, MahjongTotalSingleDataset
 from src.utils.train_utils import setup_chinese_font
 
 def setup_training_environment(model_type):
@@ -98,7 +98,7 @@ def save_model(model, optimizer, epoch, discard_accuracy, action_accuracy, chi_a
     torch.save(checkpoint, filepath)
     print(f"保存模型: {filepath}")
 
-def train_full_action_model(num_epochs=20, lr=1e-4, results_dir=None):
+def train_total_model(num_epochs=20, lr=1e-4, results_dir=None):
     """
     训练吃碰杠胡请求模型
     
@@ -332,5 +332,247 @@ def train_full_action_model(num_epochs=20, lr=1e-4, results_dir=None):
     
     return model, history, results_dir
 
+def plot_training_history_single(history, results_dir):
+    """绘制统一动作空间模型的训练历史图
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'val_loss': [],
+        'val_accuracy': []
+    }
+    """
+    # 确保matplotlib可以使用中文
+    setup_chinese_font()
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    # 绘制损失曲线
+    ax1.plot(history['train_loss'], label='训练损失')
+    ax1.plot(history['val_loss'], label='验证损失')
+    ax1.set_xlabel('轮数')
+    ax1.set_ylabel('损失')
+    ax1.set_title('损失曲线')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # 绘制准确率曲线
+    ax2.plot(history['val_accuracy'], label='统一准确率')
+    ax2.set_xlabel('轮数')
+    ax2.set_ylabel('准确率')
+    ax2.set_title('验证准确率')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, "training_history.png"))
+    plt.close()
+
+def save_single_model(model, optimizer, epoch, accuracy, val_loss, filepath):
+    """保存统一动作空间模型"""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'accuracy': accuracy,
+        'loss': val_loss,
+    }
+    
+    torch.save(checkpoint, filepath)
+    print(f"保存模型: {filepath}")
+
+def train_total_single_model(num_epochs=20, lr=1e-4, results_dir=None):
+    """
+    训练整合型麻将决策模型（统一动作空间）
+    
+    参数:
+    num_epochs: 训练轮数
+    lr: 学习率
+    results_dir: 结果保存目录
+    
+    返回:
+    model: 训练好的模型
+    history: 训练历史记录
+    results_dir: 结果保存目录
+    """
+    # 设置训练环境，使用统一动作空间的数据集
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"使用设备: {device}")
+    
+    # 创建结果目录
+    if results_dir is None:
+        results_dir = create_results_dir("total_single_models")
+    print(f"训练结果将保存在: {results_dir}")
+    
+    # 创建数据集
+    print("加载整合型麻将数据集...")
+    full_dataset = MahjongTotalSingleDataset()
+    train_dataset, val_dataset = split_dataset(full_dataset, train_ratio=0.8)
+    train_size = len(train_dataset)
+    val_size = len(val_dataset)
+    print(f"划分数据集完成: 训练集 {train_size} 样本, 验证集 {val_size} 样本")
+    
+    # 创建数据加载器
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False)
+    
+    # 保存训练配置
+    config = {
+        "batch_size": BATCH_SIZE,
+        "num_epochs": num_epochs,
+        "learning_rate": lr,
+        "train_samples": train_size,
+        "val_samples": val_size,
+        "device": str(device),
+        "model_type": "MahjongTotalSingleModel",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    with open(os.path.join(results_dir, "training_config.json"), "w") as f:
+        json.dump(config, f, indent=4)
+    
+    # 创建模型
+    print("初始化整合型麻将决策模型...")
+    model = MahjongTotalSingleModel(
+        dropout_rate=0.1,
+        input_size=198,  # 输入尺寸: 14*4 + 16*3 + 30*3 = 198
+        output_size=44   # 输出尺寸: 37 + 4 + 3 = 44 (打牌+特殊动作+吃碰杠胡+吃牌方式)
+    ).to(device)
+    
+    # 计算参数数量
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"模型参数: 总数 {total_params/1e6:.2f}M, 可训练 {trainable_params/1e6:.2f}M")
+    
+    # 损失函数和优化器
+    criterion = nn.CrossEntropyLoss(ignore_index=-1)  # 忽略无效目标(标记为-1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2, verbose=True
+    )
+    
+    # 训练记录
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'val_loss': [],
+        'val_accuracy': []
+    }
+    
+    # 最佳模型跟踪
+    best_accuracy = 0.0
+    best_model_path = os.path.join(results_dir, "mahjong_total_single_best.pth")
+    
+    print(f"开始训练，共 {num_epochs} 个周期...")
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # 启用同步CUDA操作，便于定位错误
+    
+    for epoch in range(num_epochs):
+        # 训练阶段
+        model.train()
+        train_loss = 0.0
+        
+        for i, batch in enumerate(train_loader):
+            # 获取输入和目标
+            features = batch['features'].to(device)
+            rush_tile_id = batch['rush_tile_id'].to(device)
+            turn = batch['turn'].to(device)
+            unified_target = batch['unified_target'].to(device)
+            unified_mask = batch['unified_mask'].to(device)
+            
+            # 前向传播
+            unified_logits = model(features, rush_tile_id, turn, unified_mask)
+            
+            # 计算损失
+            loss = criterion(unified_logits, unified_target)
+            
+            # 反向传播和优化
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            
+            # 打印进度
+            if (i + 1) % 50 == 0:
+                print(f"Epoch [{epoch+1}/{num_epochs}], "
+                      f"Step [{i+1}/{len(train_loader)}], "
+                      f"Loss: {loss.item():.4f}")
+        
+        # 计算平均训练损失
+        train_loss = train_loss / len(train_loader)
+        
+        # 验证阶段
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                features = batch['features'].to(device)
+                rush_tile_id = batch['rush_tile_id'].to(device)
+                turn = batch['turn'].to(device)
+                unified_target = batch['unified_target'].to(device)
+                unified_mask = batch['unified_mask'].to(device)
+                
+                # 前向传播
+                unified_logits = model(features, rush_tile_id, turn, unified_mask)
+                
+                # 计算损失
+                loss = criterion(unified_logits, unified_target)
+                val_loss += loss.item()
+                
+                # 计算准确率
+                _, preds = torch.max(unified_logits, 1)
+                # 只对有效目标（不为-1）计算准确率
+                valid_mask = (unified_target != -1)
+                val_correct += (preds[valid_mask] == unified_target[valid_mask]).sum().item()
+                val_total += valid_mask.sum().item()
+        
+        # 计算平均验证损失和准确率
+        val_loss = val_loss / len(val_loader)
+        accuracy = val_correct / val_total if val_total > 0 else 0
+        
+        # 更新学习率
+        scheduler.step(val_loss)
+        
+        # 记录训练历史
+        history['epoch'].append(epoch)
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['val_accuracy'].append(accuracy)
+        
+        # 打印本轮结果
+        print(f"Epoch [{epoch+1}/{num_epochs}], "
+              f"Train Loss: {train_loss:.4f}, "
+              f"Val Loss: {val_loss:.4f}, "
+              f"Accuracy: {accuracy:.4f}")
+        
+        # 保存最佳模型
+        if accuracy > best_accuracy:
+            best_accuracy = accuracy
+            save_single_model(model, optimizer, epoch + 1, accuracy, val_loss, best_model_path)
+            print(f"保存新的最佳模型，准确率: {accuracy:.4f}")
+        
+        # 绘制训练历史图
+        plot_training_history_single(history, results_dir)
+    
+    # 保存最终模型
+    final_model_path = os.path.join(results_dir, "mahjong_total_single_final.pth")
+    save_single_model(model, optimizer, num_epochs, accuracy, val_loss, final_model_path)
+    
+    print(f"\n训练完成! 最佳验证准确率: {best_accuracy:.4f}")
+    print(f"结果保存在: {results_dir}")
+    
+    return model, history, results_dir
+
+'''
+python train_total_model.py single
+'''
 if __name__ == "__main__":
-    train_full_action_model(num_epochs=30)
+    # 可以选择训练哪个模型
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == 'single':
+        print("训练整合型麻将决策模型（统一动作空间）...")
+        train_total_single_model(num_epochs=30)
+    else:
+        print("训练常规麻将决策模型...")
+        train_total_model(num_epochs=30)

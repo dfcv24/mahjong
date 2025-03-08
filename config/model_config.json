@@ -1,5 +1,5 @@
 {
-    "total_model_path": "models/total_models/training_results_20250308_184448/mahjong_total_best.pth",
+    "total_model_path": "models/total_single_models/training_results_20250308_232533/mahjong_total_single_best.pth",
     "discard_model_path": "models/full_discard_models/training_results_20250306_010049/full_mahjong_discard_best.pth",
     "action_model_path": "models/full_action_models/training_results_20250306_194742/mahjong_action_best.pth",
     "embedding_dim": 128,

@@ -25,7 +25,8 @@ class MahjongClientServer:
         self.player_id = None  # 玩家名称/ID
         self.player_index = None  # 玩家在牌桌上的位置
         self.hand_cards = []
-        self.is_discard = True
+        self.need_discard = False
+        self.need_rush = False
         self.socket = None
         self.receive_thread = None
         self.running = False
@@ -44,6 +45,11 @@ class MahjongClientServer:
         self.last_discard_player_index = None  # 最后出牌的玩家index
 
         self.current_game_score = 0  # 当前游戏得分
+        # 初始化牌名映射
+        self.tile_to_id, self.id_to_tile = init_tile_mapping()
+        self.can_zimohu = False
+        self.can_hu = False
+        self.rush_card = None
     
     def connect_to_server(self):
         """连接到麻将服务器"""
@@ -108,23 +114,24 @@ class MahjongClientServer:
         elif parts[0] == "NextPai" or parts[0] == "GangPai":
             if len(parts) >= 8:
                 new_tile = parts[4]
-                can_zimohu = parts[5] == "True"
+                self.can_zimohu = parts[5] == "True"
                 can_angang = parts[6] == "True"
                 can_minggang = parts[7] == "True"
                 # 增加回合计数
-                self.turn_count += 1       
+                self.turn_count += 1
                 # 将新牌添加到手牌中
                 if new_tile not in ["", "None"]:
                     self.hand_cards.append(new_tile)
                     self.hand_cards = sort_hand_cards(self.hand_cards)
                 
-                print(f"摸到新牌: {new_tile}, 可以自摸胡: {can_zimohu}, 可以暗杠: {can_angang}, 可以明杠: {can_minggang}")
+                print(f"摸到新牌: {new_tile}, 可以自摸胡: {self.can_zimohu}, 可以暗杠: {can_angang}, 可以明杠: {can_minggang}")
                 print(f"当前手牌: {self.hand_cards} (共{len(self.hand_cards)}张)")
                 
-                self.is_discard = True
+                self.need_discard = True
                 # 等待处理
         # NextPaiOther 游戏编号 玩家编号 玩家序号 拿牌玩家编号 拿牌玩家序号 - 其他玩家摸牌
         elif parts[0] == "NextPaiOther" or parts[0] == "GangPaiOther":
+            self.turn_count += 1
             if len(parts) >= 6:
                 draw_player_id = parts[4]
                 draw_player_index = parts[5]
@@ -160,12 +167,12 @@ class MahjongClientServer:
                 can_chi = parts[4] == "True"
                 can_peng = parts[5] == "True"
                 can_gang = parts[6] == "True"
-                can_hu = parts[7] == "True"
-                rush_card = parts[8]
+                self.can_hu = parts[7] == "True"
+                self.rush_card = parts[8]
                 
-                print(f"收到吃碰杠胡请求: {rush_card}, 可吃: {can_chi}, 可碰: {can_peng}, 可杠: {can_gang}, 可胡: {can_hu}")
+                print(f"收到吃碰杠胡请求: {self.rush_card}, 可吃: {can_chi}, 可碰: {can_peng}, 可杠: {can_gang}, 可胡: {self.can_hu}")
                 print(f"当前手牌: {self.hand_cards}")
-                self.is_discard = False
+                self.need_rush = True
                 # 等待处理
         # NotifyRushPeng 游戏编号 玩家编号 玩家序号 碰牌玩家编号 碰牌玩家序号 碰牌
         elif parts[0] == "NotifyRushPeng":
@@ -180,7 +187,7 @@ class MahjongClientServer:
                 if peng_player_id == self.player_id:
                     self.hand_cards.remove(peng_tile)
                     self.hand_cards.remove(peng_tile)
-                    self.is_discard = True
+                    self.need_discard = True
                     # 等待处理
                 else:
                     self.send_ready()
@@ -204,7 +211,7 @@ class MahjongClientServer:
                     self.hand_cards.remove(rush_tile)
                     self.hand_cards.append(gang_tile)
                     self.hand_cards = sort_hand_cards(self.hand_cards)
-                    self.is_discard = True
+                    self.need_discard = True
                     # 等待处理
                 else:
                     self.send_ready()
@@ -223,7 +230,7 @@ class MahjongClientServer:
                 if chi_player_id == self.player_id:
                     self.hand_cards.remove(chi_tile1)
                     self.hand_cards.remove(chi_tile2)
-                    self.is_discard = True
+                    self.need_discard = True
                     # 等待处理
                 else:
                     self.send_ready()
@@ -291,235 +298,131 @@ class MahjongClientServer:
                     break
             self.send_ready()
         # 处理游戏结束消息
-        elif parts[0] == "GameFinished":
+        elif parts[0] == "GameFinished" or parts[0] == "GameOver":
             print("游戏结束")
-            self.last_game_result = {
-                "winner": parts[-1],
-                "scores": self.current_game_score
-            }
-            self.game_completed = True
-            self.send_ready()
-            self.reset_game_state()
-            # 回复服务器已准备好
-    
-    def auto_play(self, new_tile="null", can_zimohu=False, can_angang=False, can_minggang=False):
-        # 将牌转换为模型输入格式
-        feature = []
-        hand_card_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.hand_cards]
-        feature.extend(self.pad_sequence(hand_card_ids, MAX_HAND_SIZE))
-        for i in range(4):
-            player_rush_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.player_rush[i]]
-            player_discard_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.player_discards[i]]
-            feature.extend(self.pad_sequence(player_rush_ids, MAX_RUSH_SIZE))
-            feature.extend(self.pad_sequence(player_discard_ids, MAX_DISCARD_SIZE))
-        feature_tensor = torch.tensor([feature], dtype=torch.long)
-
-        # 准备回合数输入 - 修改这里，确保是整数类型
-        turn_tensor = torch.tensor([self.turn_count], dtype=torch.long)
-        
-        # 创建动作掩码张量
-        action_mask = torch.zeros((1, NUM_TILE_TYPES + 3), dtype=torch.bool)
-        # 对手牌中的每张牌设置掩码为True
-        for tile in self.hand_cards:
-            tile_id = self.tile_to_id.get(tile, NUM_TILE_TYPES)  # 如果牌不在映射中，使用填充值
-            if tile_id < NUM_TILE_TYPES:  # 确保是有效的牌ID
-                action_mask[0, tile_id] = True
-        
-        # 设置特殊动作掩码
-        action_mask[0, NUM_TILE_TYPES] = can_zimohu
-        action_mask[0, NUM_TILE_TYPES + 1] = can_angang
-        action_mask[0, NUM_TILE_TYPES + 2] = can_minggang
-
-        # 移动到设备
-        feature_tensor = feature_tensor.to(self.device)
-        turn_tensor = turn_tensor.to(self.device)
-        action_mask = action_mask.to(self.device)
-        
-        # 打印调试信息
-        print(f"牌索引张量类型: {feature_tensor.dtype}, 形状: {feature_tensor.shape}")
-        print(f"回合张量类型: {turn_tensor.dtype}, 形状: {turn_tensor.shape}")
-        print(f"动作掩码张量类型: {action_mask.dtype}, 形状: {action_mask.shape}")
-        
-        # 模型预测
-        with torch.no_grad():
-            logits = self.discard_model(feature_tensor, turn_tensor, action_mask)
-            _, predicted = torch.max(logits, 1)
-            if can_zimohu and predicted[0].item() == NUM_TILE_TYPES:
-                print("AI选择自摸胡牌")
-                self.send_zimohu()
-            elif can_angang and predicted[0].item() == NUM_TILE_TYPES + 1:
-                print("AI选择暗杠")
-                self.send_angang(new_tile)
-            elif can_minggang and predicted[0].item() == NUM_TILE_TYPES + 2:
-                print("AI选择明杠")
-                self.send_minggang(new_tile)
-            else:
-                if predicted[0] < NUM_TILE_TYPES:
-                    card_to_play = self.id_to_tile[predicted[0].item()]
-                else:
-                    print("AI决策出错, 选择默认出牌")
-                    card_to_play = self.hand_cards[-1]
-                print("AI选择打出牌", card_to_play)
-                self.hand_cards.remove(card_to_play)
-                self.last_discard = card_to_play
-                self.last_discard_player_id = self.player_id
-                self.last_discard_player_index = self.player_index
-                self.player_discards[int(self.player_index)].append(card_to_play)
-                self.hit_out_card(card_to_play)
-    
-    def auto_rush(self, rush_card, can_chi, can_peng, can_gang, can_hu):
-        """AI自动决策吃碰杠胡"""
-        if not self.action_model:
-            # 如果没有加载动作决策模型，使用简单规则
-            return self.auto_rush_simple(rush_card, can_chi, can_peng, can_gang, can_hu)
-        # try:
-        # 准备模型输入
-        feature = []
-        hand_card_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.hand_cards]
-        feature.extend(self.pad_sequence(hand_card_ids, MAX_HAND_SIZE))
-        for i in range(4):
-            player_rush_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.player_rush[i]]
-            player_discard_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.player_discards[i]]
-            feature.extend(self.pad_sequence(player_rush_ids, MAX_RUSH_SIZE))
-            feature.extend(self.pad_sequence(player_discard_ids, MAX_DISCARD_SIZE))
-        feature_tensor = torch.tensor([feature], dtype=torch.long)
-        
-        # 准备rush牌
-        rush_id = self.tile_to_id.get(rush_card, NUM_TILE_TYPES)  # 如果牌不在映射中，使用填充值
-        rush_tensor = torch.tensor([rush_id], dtype=torch.long)
-        # 准备回合数
-        turn_tensor = torch.tensor([self.turn_count], dtype=torch.long)
-        
-        # 创建允许动作的掩码向量 [过, 吃, 碰, 杠, 胡]
-        # 注意：顺序变更为与模型训练时一致
-        action_mask_tensor = torch.tensor([[
-            True,       # 过总是允许的
-            can_chi,    # 吃
-            can_peng,   # 碰 
-            can_gang,   # 杠
-            can_hu      # 胡
-        ]], dtype=torch.bool)  # 确保使用布尔类型
-
-        # 准备吃牌掩码
-        # chi_type的mask - 检查手牌中是否包含吃牌所需的两张牌
-        chi_mask = torch.zeros((1,3), dtype=torch.bool)  # 对应前吃、中吃、后吃三种类型
-        
-        if can_chi:
-            hand_ids = [self.tile_to_id.get(card, NUM_TILE_TYPES) for card in self.hand_cards]
+            result_info = {}
             
-            # 检查前吃所需的牌是否在手牌中 (需要rush_id-2和rush_id-1)
-            if rush_id < 27 and rush_id % 9 >= 2:
-                chi_mask[0,0] = ((rush_id-2) in hand_ids) and ((rush_id-1) in hand_ids)
-            
-            # 检查中吃所需的牌是否在手牌中 (需要rush_id-1和rush_id+1)
-            if rush_id < 27 and rush_id % 9 <= 8 and rush_id % 9 >=1:  # 确保不跨花色
-                chi_mask[0,1] = ((rush_id-1) in hand_ids) and ((rush_id+1) in hand_ids)
-            
-            # 检查后吃所需的牌是否在手牌中 (需要rush_id+1和rush_id+2)
-            if rush_id < 27 and rush_id % 9 <= 7:  # 确保不跨花色
-                chi_mask[0,2] = ((rush_id+1) in hand_ids) and ((rush_id+2) in hand_ids)
-        chi_mask_tensor = torch.tensor(chi_mask, dtype=torch.bool)
-
-        # 打印调试信息
-        print(f"牌索引张量类型: {feature_tensor.dtype}, 形状: {feature_tensor.shape}")
-        print(f"Rush牌张量类型: {rush_tensor.dtype}, 形状: {rush_tensor.shape}")
-        print(f"回合张量类型: {turn_tensor.dtype}, 形状: {turn_tensor.shape}")
-        print(f"动作掩码张量类型: {action_mask_tensor.dtype}, 形状: {action_mask_tensor.shape}")
-        print(f"动作掩码内容: [过={action_mask_tensor[0,0]}, 吃={action_mask_tensor[0,1]}, 碰={action_mask_tensor[0,2]}, 杠={action_mask_tensor[0,3]}, 胡={action_mask_tensor[0,4]}]")
-        print(f"吃牌掩码张量类型: {chi_mask_tensor.dtype}, 形状: {chi_mask_tensor.shape}")
-        print(f"吃牌掩码内容: [前吃={chi_mask_tensor[0,0]}, 中吃={chi_mask_tensor[0,1]}, 后吃={chi_mask_tensor[0,2]}]")
-
-        # 移动到设备
-        feature_tensor = feature_tensor.to(self.device)
-        rush_tensor = rush_tensor.to(self.device)
-        turn_tensor = turn_tensor.to(self.device)
-        action_mask_tensor = action_mask_tensor.to(self.device)
-        chi_mask_tensor = chi_mask_tensor.to(self.device)
-        
-        # 模型预测
-        with torch.no_grad():
-            action_logits, chi_logits = self.action_model(feature_tensor, rush_tensor, turn_tensor, action_mask_tensor, chi_mask_tensor)
-            
-            # 获取动作概率
-            action_probs = torch.softmax(action_logits, dim=1)
-            
-            # 打印动作概率，便于调试
-            print(f"动作概率: [过={action_probs[0,0].item():.4f}, 吃={action_probs[0,1].item():.4f}, 碰={action_probs[0,2].item():.4f}, 杠={action_probs[0,3].item():.4f}, 胡={action_probs[0,4].item():.4f}]")
-            
-            # 动作索引: 0-过, 1-吃, 2-碰, 3-杠, 4-胡
-            action_idx = torch.argmax(action_probs, dim=1).item()
-            print(f"选择的动作索引: {action_idx}")
-            
-            # 如果选择的是吃，还需要决定用哪两张牌
-            if action_idx == 1 and can_chi:  # 选择吃
-                # 从chi_logits预测两张牌的位置
-                print("处理吃牌逻辑...")
-                _, chi_index = torch.max(chi_logits, dim=1)
-                chi_index = chi_index.item()
-                print(f"选择的吃牌方式0:前吃,1:中吃,2:后吃 {chi_index}")
-                if chi_index == 0:
-                    chi_tile_ids = [rush_id-2, rush_id-1]
-                elif chi_index == 1:
-                    chi_tile_ids = [rush_id-1, rush_id+1]
-                else:
-                    chi_tile_ids = [rush_id+1, rush_id+2]
-                chi_tiles = [self.id_to_tile.get(tile_id, "null") for tile_id in chi_tile_ids]
-                print(f"选择的吃牌: {chi_tiles}")
-                if all(tile in self.hand_cards for tile in chi_tiles):
-                    self.rush_chi(chi_tiles[0], chi_tiles[1], rush_card)
-                else:
-                    print("AI选择吃牌,但是没有给出正确的牌,选择跳过")
-                    self.rush_skip(rush_card)
-            # 基于动作索引执行相应操作
-            if action_idx == 4 and can_hu:  # 胡
-                print("AI选择胡牌")
-                self.rush_hu(rush_card)
-            elif action_idx == 3 and can_gang:  # 杠
-                print("AI选择杠牌")
-                # self.hand_cards.remove(rush_card)
-                # self.hand_cards.remove(rush_card)
-                # self.hand_cards.remove(rush_card)
-                self.rush_gang(rush_card)
-            elif action_idx == 2 and can_peng:  # 碰
-                print("AI选择碰牌")
-                # self.hand_cards.remove(rush_card)
-                # self.hand_cards.remove(rush_card)
-                self.rush_peng(rush_card)
-            else:  # 过
-                print("AI选择跳过")
-                self.rush_skip(rush_card)
+            # 尝试解析更多结束信息
+            if len(parts) > 4:  # 至少包含游戏ID、玩家ID、位置和结果
+                result_info["winner"] = parts[4] if len(parts) > 4 else "unknown"
                 
-        # except Exception as e:
-        #     print(f"AI决策吃碰杠胡出错: {e}")
-        #     # 如果出错，使用简单规则
-        #     return self.auto_rush_simple(rush_card, can_chi, can_peng, can_gang, can_hu)
+                # 如果有更多信息，如分数等
+                if len(parts) > 5:
+                    try:
+                        scores = [int(s) for s in parts[5:] if s.lstrip('-').isdigit()]
+                        result_info["scores"] = scores
+                    except:
+                        pass
+            
+            self.last_game_result = result_info
+            self.game_completed = True
+            
+            # 设置获胜玩家
+            self.win_player = result_info.get("winner", "unknown")
+            
+            # 如果有分数信息，设置分数变化
+            if "scores" in result_info:
+                self.score_changes = result_info["scores"]
+                # 找出当前玩家的分数
+                if self.player_index is not None and 0 <= int(self.player_index) < len(self.score_changes):
+                    self.current_game_score = self.score_changes[int(self.player_index)]
+            
+            print(f"游戏结束详情: {result_info}")
+            self.send_ready()
+            # self.reset_game_state()
     
     def reset_game_state(self):
-        """重置游戏状态"""
-        self.game_id = None
-        self.player_id = None
-        self.player_index = None
+        """重置游戏状态，清除之前游戏的所有数据"""
+        # 重置基本游戏状态
         self.hand_cards = []
-        self.turn_count = 0
-        self.player_discards = {0: [], 1: [], 2: [], 3: []}
         self.player_rush = {0: [], 1: [], 2: [], 3: []}
+        self.player_discards = {0: [], 1: [], 2: [], 3: []}
         self.last_discard = None
-        self.last_discard_player = None
+        self.last_discard_player_id = None
         self.last_discard_player_index = None
+        self.turn_count = 0
+        self.is_discard = True
+        
+        # 重置游戏结果相关变量
+        self.game_completed = False
+        self.last_game_result = None
+        self.current_game_score = 0
+        self.win_player = None
+        self.score_changes = None
+        self.hand_score = None
+        
+        # 状态变化标志
+        self._last_state_hash = None
+        
+        # 游戏能力标志
+        self.can_zimohu = False
+        self.can_hu = False
+        
+        print("游戏状态已重置")
+    
+    def handle_game_over(self, data):
+        """处理游戏结束消息"""
+        self.game_completed = True
+        
+        # 提取游戏结果信息
+        if 'result' in data:
+            self.last_game_result = data['result']
+        
+        # 提取获胜玩家
+        if 'winPlayer' in data:
+            self.win_player = data['winPlayer']
+            
+        # 提取分数变化
+        if 'scoreChanges' in data:
+            self.score_changes = data['scoreChanges']
+            
+            # 找到当前玩家的分数变化
+            if self.player_index is not None and 0 <= int(self.player_index) < len(self.score_changes):
+                self.current_game_score = self.score_changes[int(self.player_index)]
+                
+        # 提取手牌分数
+        if 'handScore' in data:
+            self.hand_score = data['handScore']
+            
+        print(f"游戏结束，结果: {self.last_game_result}, 当前玩家得分: {self.current_game_score}")
+    
+    def has_state_changed(self):
+        """检查游戏状态是否有变化"""
+        # 计算当前状态的哈希值
+        current_state = (
+            tuple(sorted(self.hand_cards)),
+            tuple(tuple(self.player_rush[i]) for i in range(4)),
+            tuple(tuple(self.player_discards[i]) for i in range(4)),
+            self.last_discard,
+            self.last_discard_player_id,
+            self.turn_count
+        )
+        current_hash = hash(current_state)
+        
+        # 检查状态是否变化
+        changed = current_hash != self._last_state_hash
+        
+        # 更新状态哈希
+        self._last_state_hash = current_hash
+        
+        return changed
 
     def send_play_game(self, player_name="Player1"):
         """发送PlayGame命令启动单人游戏"""
         message = f"PlayGame {player_name} Single"
-        return self.send_message(message)
+        result = self.send_message(message)
+        if result:
+            print(f"已请求开始新游戏，玩家名: {player_name}")
+        return result
     
     def send_ready(self):
         """发送准备就绪信号"""
         message = f"Ready {self.game_id} {self.player_id} {self.player_index}"
         return self.send_message(message)
 
-    def rush_skip(self, card):
+    def rush_skip(self):
         """跳过吃碰杠胡"""
-        message = f"RushSkip {self.game_id} {self.player_id} {self.player_index} {card}"
+        message = f"RushSkip {self.game_id} {self.player_id} {self.player_index}"
         return self.send_message(message)
 
     def rush_chi(self, in_card1, in_card2, out_card):

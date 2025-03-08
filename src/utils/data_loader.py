@@ -277,7 +277,7 @@ class MahjongDiscardDataset(BaseMahjongDataset):
         features.extend(sample['player0_discard'])
         
         # 其他玩家数据
-        for i in range(1, 4):
+        for i in range(1, 3):
             features.extend(sample[f'player{i}_rush'])
             features.extend(sample[f'player{i}_discard'])
         
@@ -834,6 +834,299 @@ class MahjongTotalDataset(BaseMahjongDataset):
             'action_target': action_target,
             'chi_type': chi_target,  # 新的吃牌类型标签
             'chi_mask': chi_mask,
+            'game_id': sample['game_id']
+        }
+
+class MahjongTotalSingleDataset(BaseMahjongDataset):
+    """
+    整合型麻将数据集，读入所有打牌和吃碰杠胡决策数据，但将所有可能动作整合到一个输出
+    
+    输出：
+    - 整合后的目标向量 (37+4+3=44维)：
+      - 前37维：打牌决策 (34种牌 + 自摸胡 + 暗杠 + 明杠)
+      - 中间4维：吃碰杠胡决策 (过, 碰, 杠, 胡) - 去掉了"吃"
+      - 后3维：吃牌类型 (前吃, 中吃, 后吃)
+    - 整合后的掩码向量 (44维)
+    """
+    def __init__(self, data_folder="/home/luzhiwei/data/a/mahjong_data", max_samples=None, debug=False):
+        print(f"初始化整合型麻将数据集，加载目录: {data_folder}")
+        super().__init__(data_folder, max_samples, debug)
+        self._load_data(max_samples)
+        print(f"加载完成，共 {len(self.data)} 个样本")
+    
+    def _load_data(self, max_samples):
+        """
+        加载所有麻将决策数据，包括打牌和吃碰杠胡决策
+        """
+        sample_count = 0
+        
+        for game_folder in self.game_folders:
+            game_path = os.path.join(self.data_folder, game_folder)
+            step_files = sorted(glob.glob(os.path.join(game_path, "*.txt")))
+            for step_file in step_files:
+                rush_tile_id = NUM_TILE_TYPES
+                discard_target = -1
+                can_zimohu = False
+                can_angang = False
+                can_minggang = False
+                action_mask = [False, False, False, False, False]
+                action_target = -1
+                chi_tiles_id = []
+                try:
+                    is_action_file = False
+                    if '_a.txt' in step_file:
+                        is_action_file = True
+                    # 读取文件
+                    with open(step_file, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    
+                    if len(lines) < 18:  # 至少需要18行: 第一行信息, 四个玩家信息(每个4行), 最后一行动作
+                        if self.debug:
+                            print(f"警告: 文件行数不足 - {step_file}")
+                        continue
+                    
+                    # 解析第一行 - 获取回合信息和Rush牌
+                    first_line = lines[0].strip().split()
+                    if not is_action_file:
+                        if len(first_line) < 7:
+                            # 数据格式不符合要求，跳过
+                            continue
+                        # 解析基本信息
+                        game_id = first_line[0]                # 牌局ID
+                        turn = int(first_line[1])              # 回合序号
+                        player_name = first_line[2]            # 玩家名
+                        remaining_tiles = int(first_line[3])   # 剩余牌数
+                        
+                        # 解析特殊动作可用性
+                        can_zimohu = first_line[4].lower() in ('true', '1', 't', 'yes', 'y')
+                        can_angang = first_line[5].lower() in ('true', '1', 't', 'yes', 'y')
+                        can_minggang = first_line[6].lower() in ('true', '1', 't', 'yes', 'y')
+                    else:
+                        if len(first_line) < 9:  # 至少需要9个元素
+                            if self.debug:
+                                print(f"警告: 首行格式不正确 - {step_file}")
+                            continue
+                        game_id = first_line[0]  # 牌局ID
+                        turn = int(first_line[1])  # 回合序号
+                        player_name = first_line[2]  # 玩家名
+                        remaining_tiles = int(first_line[3])  # 剩余牌数
+                        
+                        # 解析rush牌 (别人打出的牌)
+                        rush_tile_str = first_line[4]
+                        rush_tile_id = chinese_tile_to_id(rush_tile_str)
+                        
+                        if rush_tile_id < 0:
+                            if self.debug:
+                                print(f"警告: 无法解析Rush牌 '{rush_tile_str}' in {step_file}")
+                            continue
+                            
+                        # 解析服务端发来的可能动作布尔值
+                        can_chi = first_line[5].lower() == "true"
+                        can_peng = first_line[6].lower() == "true"
+                        can_gang = first_line[7].lower() == "true"
+                        can_hu = first_line[8].lower() == "true"
+                        
+                        # 可执行动作的掩码 (5个动作: 过, 吃, 碰, 杠, 胡)
+                        # 过/skip总是可选的
+                        action_mask = [True, can_chi, can_peng, can_gang, can_hu]
+
+                    # 处理玩家数据
+                    player_data = self._process_player_data(lines)
+                    if player_data is None:
+                        continue
+
+                    # 解析最后一行的动作
+                    last_line = lines[-1].strip()
+                    if not is_action_file:
+                        if "zimohu" in last_line:
+                            discard_target = NUM_TILE_TYPES  # 胡牌
+                        elif "zimoangang" in last_line:
+                            discard_target = NUM_TILE_TYPES + 1  # 暗杠
+                        elif "zimominggang" in last_line:
+                            discard_target = NUM_TILE_TYPES + 2  # 明杠
+                        else:
+                            # 处理普通打牌
+                            parts = last_line.split()
+                            if len(parts) < 3 or parts[0] != "action" or parts[1] != "hitout":
+                                continue
+                            # 根据中文牌名获取牌ID
+                            card_name = parts[2]
+                            discard_target = chinese_tile_to_id(card_name)
+                    else:
+                        action_tokens = last_line.split()
+                        if len(action_tokens) < 2:
+                            continue  # 跳过不完整数据
+                        action_type = action_tokens[1].lower()
+                        
+                        # 解析动作类型
+                        if action_type in ["过", "skip", "pass"]:
+                            action_target = ACTION_SKIP
+                            chi_tiles_id = []
+                        elif action_type in ["吃", "chi"]:
+                            action_target = ACTION_CHI
+                            # 吃牌时还有额外的两张牌
+                            if len(action_tokens) >= 4:
+                                try:
+                                    chi_tiles_id = []
+                                    for i in range(2, 4):
+                                        tile_id = chinese_tile_to_id(action_tokens[i])
+                                        if tile_id is not None:
+                                            chi_tiles_id.append(tile_id)
+                                        else:
+                                            if self.debug:
+                                                print(f"警告: 无法解析吃牌 '{action_tokens[i]}' in {step_file}")
+                                except Exception:
+                                    chi_tiles_id = []
+                            else:
+                                chi_tiles_id = []
+                        elif action_type in ["碰", "peng"]:
+                            action_target = ACTION_PENG
+                            chi_tiles_id = []
+                        elif action_type in ["杠", "gang"]:
+                            action_target = ACTION_GANG
+                            chi_tiles_id = []
+                        elif action_type in ["胡", "hu"]:
+                            action_target = ACTION_HU
+                            chi_tiles_id = []
+                        else:
+                            if self.debug:
+                                print(f"未知动作类型: {action_type} 在 {step_file}")
+                            continue
+                        
+                        # 检查动作是否在可执行动作范围内
+                        if not action_mask[action_target]:
+                            if self.debug:
+                                print(f"警告: 动作 {action_type} 不在服务器允许的动作列表中: {step_file}")
+                            continue
+                    
+                    # 添加到样本列表
+                    # 创建样本
+                    sample = {
+                        'game_id': game_id,
+                        'is_action_file': is_action_file,
+                        'turn': turn,
+                        'rush_tile_id': rush_tile_id,
+                        'can_zimohu': can_zimohu,
+                        'can_angang': can_angang,
+                        'can_minggang': can_minggang,
+                        'discard_target': discard_target,
+                        'action_mask': action_mask,
+                        'action_target': action_target,
+                        'chi_tiles_id': chi_tiles_id
+                    }
+                    
+                    # 添加玩家数据
+                    sample.update(player_data)
+                    self.data.append(sample)
+                    
+                    sample_count += 1
+                    if max_samples is not None and sample_count >= max_samples:
+                        return
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"Error processing file {step_file}: {e}")
+                    continue
+    
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+        
+        # 构建输入特征
+        features = []
+        
+        # 当前玩家数据
+        features.extend(sample['player0_hand'])
+        features.extend(sample['player0_rush'])
+        features.extend(sample['player0_discard'])
+        
+        # 其他玩家数据
+        for i in range(1, 4):
+            features.extend(sample[f'player{i}_rush'])
+            features.extend(sample[f'player{i}_discard'])
+        
+        # 创建输入张量
+        features_tensor = torch.tensor(features, dtype=torch.long)
+        
+        # Rush牌信息
+        rush_tile_id = torch.tensor(sample['rush_tile_id'], dtype=torch.long)
+        
+        # 回合数
+        turn_tensor = torch.tensor(sample['turn'], dtype=torch.long)
+        
+        # 初始化整合后的目标向量和掩码向量 (37+4+3=44维)
+        unified_target = torch.tensor(-1, dtype=torch.long)  # 默认值-1表示无效目标
+        unified_mask = torch.zeros(44, dtype=torch.bool)  # 全部初始化为False
+        
+        # 根据文件类型确定目标和掩码
+        if not sample["is_action_file"]:  # 打牌决策数据
+            # 设置打牌掩码 (前37维，对应打出的牌和特殊动作)
+            for tile_id in sample['player0_hand']:
+                if tile_id < NUM_TILE_TYPES:  # 确保是有效的牌ID
+                    unified_mask[tile_id] = True
+            
+            unified_mask[NUM_TILE_TYPES] = sample['can_zimohu']     # 自摸胡
+            unified_mask[NUM_TILE_TYPES + 1] = sample['can_angang']  # 暗杠
+            unified_mask[NUM_TILE_TYPES + 2] = sample['can_minggang'] # 明杠
+            
+            # 设置打牌目标
+            if sample['discard_target'] != -1:
+                unified_target = sample['discard_target']  # 实际打出的牌或特殊动作
+            
+        else:  # 吃碰杠胡决策数据
+            # 设置吃碰杠胡决策掩码 (中间4维，从37开始)
+            # 跳过"吃"这一动作，直接使用前吃、中吃、后吃
+            unified_mask[37] = sample['action_mask'][0]  # 过
+            unified_mask[38] = sample['action_mask'][2]  # 碰
+            unified_mask[39] = sample['action_mask'][3]  # 杠
+            unified_mask[40] = sample['action_mask'][4]  # 胡
+            
+            # 设置吃牌类型掩码 (后3维，从41开始)
+            if sample['action_target'] == ACTION_CHI:
+                hand_nums = sample['player0_hand']
+                rush_num = sample['rush_tile_id']
+                
+                # 检查前吃所需的牌是否在手牌中
+                if rush_num < 27 and rush_num % 9 >= 2:
+                    unified_mask[41] = ((rush_num-2) in hand_nums) and ((rush_num-1) in hand_nums)
+                
+                # 检查中吃所需的牌是否在手牌中
+                if rush_num < 27 and rush_num % 9 <= 8 and rush_num % 9 >= 1:
+                    unified_mask[42] = ((rush_num-1) in hand_nums) and ((rush_num+1) in hand_nums)
+                
+                # 检查后吃所需的牌是否在手牌中
+                if rush_num < 27 and rush_num % 9 <= 7:
+                    unified_mask[43] = ((rush_num+1) in hand_nums) and ((rush_num+2) in hand_nums)
+            
+            # 设置吃碰杠胡目标和吃牌类型目标
+            if sample['action_target'] != -1:
+                # 处理各种行动的目标
+                if sample['action_target'] == ACTION_SKIP:  # 过
+                    unified_target = 37
+                elif sample['action_target'] == ACTION_PENG:  # 碰
+                    unified_target = 38
+                elif sample['action_target'] == ACTION_GANG:  # 杠
+                    unified_target = 39
+                elif sample['action_target'] == ACTION_HU:  # 胡
+                    unified_target = 40
+                elif sample['action_target'] == ACTION_CHI and sample['chi_tiles_id']:  # 吃
+                    rush_num = sample['rush_tile_id']
+                    chi_nums = sample['chi_tiles_id']
+                    
+                    # 根据序号关系确定吃牌类型
+                    if all(n < rush_num for n in chi_nums):  # 前吃
+                        unified_target = 41
+                    elif all(n > rush_num for n in chi_nums):  # 后吃
+                        unified_target = 43
+                    else:  # 中吃
+                        unified_target = 42
+        
+        return {
+            'features': features_tensor,
+            'rush_tile_id': rush_tile_id,
+            'turn': turn_tensor,
+            'unified_target': unified_target,
+            'unified_mask': unified_mask,
+            'is_action_file': sample["is_action_file"],  # 添加文件类型标记，便于分析
             'game_id': sample['game_id']
         }
 
