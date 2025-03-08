@@ -164,7 +164,7 @@ def main():
         print("麻将客户端启动")
         
         try:
-            client.load_ai_models()
+            client.load_ai_models(model_num=1)
             if args.auto:
                 # 自动对局模式
                 run_auto_games(client, args.games, args.player, args.delay)

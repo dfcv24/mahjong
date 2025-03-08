@@ -14,19 +14,18 @@ from src.models.model import MahjongDiscardModel, MahjongActionModel, MahjongTot
 from src.utils.constants import *
 from src.utils.tile_utils import init_tile_mapping, sort_hand_cards
 
-class MahjongClient:
+class MahjongClientServer:
     def __init__(self, server_ip="127.0.0.1", server_port=5000, client_port=5001):
         self.server_ip = server_ip
         self.server_port = server_port
         self.client_ip = "127.0.0.1"
         self.client_port = client_port
+        self.player_name = "luu"
         self.game_id = None
         self.player_id = None  # 玩家名称/ID
         self.player_index = None  # 玩家在牌桌上的位置
         self.hand_cards = []
-        self.discard_model = None
-        self.action_model = None  # 吃碰杠胡决策模型
-        self.total_model = None
+        self.is_discard = True
         self.socket = None
         self.receive_thread = None
         self.running = False
@@ -83,50 +82,6 @@ class MahjongClient:
                 traceback.print_exc()  # 打印详细错误栈
                 self.running = False
                 break
-    
-    def load_ai_models(self, model_num=1):
-        """加载AI模型和动作决策模型"""
-        # 读取配置文件
-        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config", "model_config.json")
-           
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-            # 初始化牌名映射
-            self.tile_to_id, self.id_to_tile = init_tile_mapping()
-            
-            if model_num == 2:
-                discard_model_path = config["discard_model_path"]
-                action_model_path = config["action_model_path"]
-            
-                # 加载出牌决策模型
-                print(f"加载出牌模型: {discard_model_path}")
-                checkpoint = torch.load(discard_model_path, map_location=self.device)
-                discard_model = MahjongDiscardModel().to(self.device)
-                discard_model.load_state_dict(checkpoint['model_state_dict'])
-                discard_model.eval()  # 设置为评估模式
-                self.discard_model = discard_model
-                
-                # 加载吃碰杠胡决策模型
-                print(f"加载动作决策模型: {action_model_path}")
-                action_checkpoint = torch.load(action_model_path, map_location=self.device)
-                action_model = MahjongActionModel().to(self.device)
-                action_model.load_state_dict(action_checkpoint['model_state_dict'])
-                action_model.eval()  # 设置为评估模式
-                self.action_model = action_model
-            elif model_num == 1:
-                total_model_path = config["total_model_path"]
-                print(f"加载总模型: {total_model_path}")
-                checkpoint = torch.load(total_model_path, map_location=self.device)
-                total_model = MahjongTotalModel().to(self.device)
-                total_model.load_state_dict(checkpoint['model_state_dict'])
-                total_model.eval()  # 设置为评估模式
-                self.total_model = total_model
-            print("所有AI模型加载成功")
-            return True
-        except Exception as e:
-            print(f"加载AI模型失败: {e}")
-            return False
         
     def handle_message(self, message):
         """处理从服务器接收到的消息"""
@@ -166,8 +121,8 @@ class MahjongClient:
                 print(f"摸到新牌: {new_tile}, 可以自摸胡: {can_zimohu}, 可以暗杠: {can_angang}, 可以明杠: {can_minggang}")
                 print(f"当前手牌: {self.hand_cards} (共{len(self.hand_cards)}张)")
                 
-                # 如果可以胡且AI模型已加载，考虑自动胡牌
-                self.auto_play(new_tile, can_zimohu, can_angang, can_minggang)
+                self.is_discard = True
+                # 等待处理
         # NextPaiOther 游戏编号 玩家编号 玩家序号 拿牌玩家编号 拿牌玩家序号 - 其他玩家摸牌
         elif parts[0] == "NextPaiOther" or parts[0] == "GangPaiOther":
             if len(parts) >= 6:
@@ -184,9 +139,6 @@ class MahjongClient:
                 card = parts[4]
                 hit_player_id = parts[5]
                 hit_player_index = parts[6]
-                
-                # 记录出牌历史
-                # self.discard_history.append((hit_player_id, card))
                 
                 # 记录特定玩家的出牌历史
                 player_pos = int(hit_player_index)
@@ -213,13 +165,8 @@ class MahjongClient:
                 
                 print(f"收到吃碰杠胡请求: {rush_card}, 可吃: {can_chi}, 可碰: {can_peng}, 可杠: {can_gang}, 可胡: {can_hu}")
                 print(f"当前手牌: {self.hand_cards}")
-                
-                # 如果已加载AI动作模型，使用模型自动响应
-                if self.action_model:
-                    self.auto_rush(rush_card, can_chi, can_peng, can_gang, can_hu)
-                else:
-                    # 使用简单规则
-                    self.auto_rush_simple(rush_card, can_chi, can_peng, can_gang, can_hu)
+                self.is_discard = False
+                # 等待处理
         # NotifyRushPeng 游戏编号 玩家编号 玩家序号 碰牌玩家编号 碰牌玩家序号 碰牌
         elif parts[0] == "NotifyRushPeng":
             if len(parts) >= 7:
@@ -233,7 +180,8 @@ class MahjongClient:
                 if peng_player_id == self.player_id:
                     self.hand_cards.remove(peng_tile)
                     self.hand_cards.remove(peng_tile)
-                    self.auto_play()
+                    self.is_discard = True
+                    # 等待处理
                 else:
                     self.send_ready()
         # NotifyRushGang 游戏编号 玩家编号 玩家序号 杠牌玩家编号 杠牌玩家序号 杠牌1 抽牌2
@@ -256,7 +204,8 @@ class MahjongClient:
                     self.hand_cards.remove(rush_tile)
                     self.hand_cards.append(gang_tile)
                     self.hand_cards = sort_hand_cards(self.hand_cards)
-                    self.auto_play()
+                    self.is_discard = True
+                    # 等待处理
                 else:
                     self.send_ready()
         # NotifyRushChi 游戏编号 玩家编号 玩家序号 吃牌玩家编号 吃牌玩家序号 吃牌1 吃牌2 吃牌3
@@ -274,7 +223,8 @@ class MahjongClient:
                 if chi_player_id == self.player_id:
                     self.hand_cards.remove(chi_tile1)
                     self.hand_cards.remove(chi_tile2)
-                    self.auto_play()
+                    self.is_discard = True
+                    # 等待处理
                 else:
                     self.send_ready()
         # NotifyRushHu 游戏编号 玩家编号 玩家序号 胡牌玩家编号 胡牌玩家序号 手牌数 手牌列表
@@ -543,27 +493,6 @@ class MahjongClient:
         #     print(f"AI决策吃碰杠胡出错: {e}")
         #     # 如果出错，使用简单规则
         #     return self.auto_rush_simple(rush_card, can_chi, can_peng, can_gang, can_hu)
-    
-    def auto_rush_simple(self, rush_card, can_chi, can_peng, can_gang, can_hu):
-        """使用简单规则决策吃碰杠胡"""
-        # 简单逻辑：优先级 胡 > 杠 > 碰 > 吃 > 跳过
-        time.sleep(1)  # 模拟思考时间
-        
-        if can_hu:
-            print("AI选择胡牌(简单规则)")
-            self.rush_hu(rush_card)
-        elif can_gang:
-            print("AI选择杠牌(简单规则)") 
-            self.rush_gang(rush_card)
-        elif can_peng:
-            print("AI选择碰牌(简单规则)")
-            self.rush_peng(rush_card)
-        elif can_chi:
-            print("AI选择吃牌(简单规则)=跳过")
-            self.rush_skip(rush_card)
-        else:
-            print("AI选择跳过(简单规则)")
-            self.rush_skip(rush_card)
     
     def reset_game_state(self):
         """重置游戏状态"""
