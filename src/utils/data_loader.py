@@ -500,32 +500,11 @@ class MahjongActionDataset(BaseMahjongDataset):
         # 目标动作
         action = torch.tensor(sample['action'], dtype=torch.long)
         
-        # 吃牌位置
-        if sample['action'] == ACTION_CHI and sample['chi_tiles']:
-            # 找出chi_tiles中每个牌在手牌中的位置
-            chi_indices = []
-            for tile in sample['chi_tiles']:
-                # 查找tile在手牌中的位置
-                positions = [i for i, t in enumerate(sample['player0_hand']) if t == tile]
-                if positions:
-                    chi_indices.append(positions[0])  # 取第一个匹配位置
-                else:
-                    # 找不到位置，用一个安全的默认值
-                    chi_indices.append(0)
-            
-            # 确保chi_indices长度为2
-            while len(chi_indices) < 2:
-                chi_indices.append(0)
-                
-            chi_tensor = torch.tensor(chi_indices, dtype=torch.long)
-        else:
-            chi_tensor = torch.full((2,), -1, dtype=torch.long)  # 用-1填充，表示无效索引
-        
         # 吃牌类型 (0=前吃, 1=中吃, 2=后吃)
         if sample['action'] == ACTION_CHI and sample['chi_tiles']:
             # 获取rush牌和chi牌的序号
-            rush_num = self._get_tile_number(sample['rush_tile'])
-            chi_nums = [self._get_tile_number(t) for t in sample['chi_tiles']]
+            rush_num = sample['rush_tile']
+            chi_nums = sample['chi_tiles']
             
             # 根据序号关系确定吃牌类型
             if all(n < rush_num for n in chi_nums):  # 所有吃牌序号都小于rush牌
@@ -539,6 +518,25 @@ class MahjongActionDataset(BaseMahjongDataset):
         else:
             chi_tensor = torch.tensor(-1, dtype=torch.long)  # 用-1表示非吃牌样本
         
+        # chi_type的mask - 检查手牌中是否包含吃牌所需的两张牌
+        chi_mask = torch.zeros(3, dtype=torch.bool)  # 对应前吃、中吃、后吃三种类型
+        
+        if sample['action'] == ACTION_CHI:
+            hand_nums = sample['player0_hand']
+            rush_num = sample['rush_tile']
+            
+            # 检查前吃所需的牌是否在手牌中 (需要rush_num-2和rush_num-1)
+            if rush_num < 27 and rush_num % 9 >= 2:
+                chi_mask[0] = ((rush_num-2) in hand_nums) and ((rush_num-1) in hand_nums)
+            
+            # 检查中吃所需的牌是否在手牌中 (需要rush_num-1和rush_num+1)
+            if rush_num < 27 and rush_num % 9 <= 8 and rush_num % 9 >=1:  # 确保不跨花色
+                chi_mask[1] = ((rush_num-1) in hand_nums) and ((rush_num+1) in hand_nums)
+            
+            # 检查后吃所需的牌是否在手牌中 (需要rush_num+1和rush_num+2)
+            if rush_num < 27 and rush_num % 9 <= 7:  # 确保不跨花色
+                chi_mask[2] = ((rush_num+1) in hand_nums) and ((rush_num+2) in hand_nums)
+             
         return {
             'features': features_tensor,
             'rush_tile': rush_tile,
@@ -546,20 +544,9 @@ class MahjongActionDataset(BaseMahjongDataset):
             'action_mask': action_mask,
             'action': action,
             'chi_type': chi_tensor,  # 新的吃牌类型标签
+            'chi_mask': chi_mask,
             'game_id': sample['game_id']
         }
-    
-    # 辅助函数 - 获取牌的序号
-    def _get_tile_number(self, tile_id):
-        """将牌ID转换为数字序号 (0-8表示万, 9-17表示条, 18-26表示筒)"""
-        if tile_id < 9:  # 万
-            return tile_id
-        elif tile_id < 18:  # 条
-            return tile_id - 9
-        elif tile_id < 27:  # 筒
-            return tile_id - 18
-        else:  # 字牌
-            return tile_id  # 字牌不适用于顺子，这里只是占位
     
 def split_dataset(dataset, train_ratio=0.8, val_ratio=0.2, seed=None):
     # 设置随机种子

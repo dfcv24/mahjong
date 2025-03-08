@@ -1,6 +1,6 @@
 {
-    "discard_model_path": "models/discard_models/mahjong_transformer_best.pth",
-    "action_model_path": "models/action_models/mahjong_action_request_best.pth",
+    "discard_model_path": "models/full_discard_models/training_results_20250306_010049/full_mahjong_discard_best.pth",
+    "action_model_path": "models/full_action_models/training_results_20250306_194742/mahjong_action_best.pth",
     "embedding_dim": 128,
     "num_heads": 8,
     "num_layers": 6,
