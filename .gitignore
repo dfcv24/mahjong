@@ -6,6 +6,10 @@ models/simple_action_models
 models/simple_discard_models
 models/total_models
 models/total_single_models
+models/ppo_models
 useless
 results/game_results
 results/tests
+logs
+stats
+monitor_outputs
